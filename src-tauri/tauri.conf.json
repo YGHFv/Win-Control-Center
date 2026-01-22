@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Control Center",
+        "title": "",
         "width": 360,
         "height": 400,
         "decorations": false,

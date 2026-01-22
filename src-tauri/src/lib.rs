@@ -14,6 +14,18 @@ use tauri::{
 };
 use winreg::{enums::*, RegKey};
 
+fn is_light_mode_registry() -> bool {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(key) =
+        hkcu.open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
+    {
+        if let Ok(val) = key.get_value::<u32, _>("AppsUseLightTheme") {
+            return val == 1;
+        }
+    }
+    false
+}
+
 #[derive(Clone, PartialEq)]
 struct LastTrayState {
     out_devs: Vec<audio::AudioDevice>,
@@ -224,7 +236,12 @@ pub fn run() {
             let _ = window.set_shadow(true);
             let _ = window.set_title("");
 
-            let theme = window.theme().ok().unwrap_or(Theme::Dark);
+            // Initial theme from registry (more reliable than window.theme() at start)
+            let theme = if is_light_mode_registry() {
+                Theme::Light
+            } else {
+                Theme::Dark
+            };
             let icon_path = match theme {
                 Theme::Light => "icons/icon_black.png",
                 _ => "icons/icon_white.png",
@@ -318,24 +335,27 @@ pub fn run() {
                                     }
                                     state.last_show.store(now, Ordering::SeqCst);
 
-                                    let win_size =
-                                        window.outer_size().unwrap_or(tauri::PhysicalSize {
-                                            width: 360,
-                                            height: 400,
-                                        });
+                                    let scale_factor = window.scale_factor().unwrap_or(1.0);
                                     let (tx, ty) = match rect.position {
                                         tauri::Position::Physical(p) => (p.x, p.y),
-                                        tauri::Position::Logical(l) => (l.x as i32, l.y as i32),
+                                        tauri::Position::Logical(l) => (
+                                            (l.x * scale_factor) as i32,
+                                            (l.y * scale_factor) as i32,
+                                        ),
                                     };
                                     let tw = match rect.size {
                                         tauri::Size::Physical(s) => s.width,
-                                        tauri::Size::Logical(l) => l.width as u32,
+                                        tauri::Size::Logical(l) => (l.width * scale_factor) as u32,
                                     };
+
+                                    let win_size =
+                                        window.outer_size().unwrap_or(tauri::PhysicalSize {
+                                            width: (360.0 * scale_factor) as u32,
+                                            height: (400.0 * scale_factor) as u32,
+                                        });
+
                                     let x = tx + (tw as i32 / 2) - (win_size.width as i32 / 2);
-                                    let mut y = ty - win_size.height as i32 - 10;
-                                    if y < 0 {
-                                        y = ty + 40;
-                                    }
+                                    let y = ty - win_size.height as i32 - 10;
 
                                     let _ = window.set_position(tauri::Position::Physical(
                                         tauri::PhysicalPosition { x, y },

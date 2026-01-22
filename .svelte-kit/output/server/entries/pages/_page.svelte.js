@@ -46,13 +46,14 @@ function _page($$renderer, $$props) {
       for (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {
         let app = each_array[$$index];
         $$renderer2.push(`<div class="app-row svelte-1uha8ag"><div${attr_class(`icon-box ${stringify(app.is_muted ? "muted" : "")}`, "svelte-1uha8ag")}${attr("title", app.name)} style="cursor: pointer;">`);
-        if (app.icon_path) {
+        if (app.icon_path && app.icon_path !== "") {
           $$renderer2.push("<!--[-->");
           $$renderer2.push(`<img class="app-icon svelte-1uha8ag"${attr_style(`filter: ${stringify(app.is_muted ? "grayscale(1) opacity(0.5)" : "none")}`)}${attr("src", app.icon_path.startsWith("data:") ? app.icon_path : convertFileSrc(app.icon_path))} alt="" onerror="this.__e=event"/>`);
         } else {
           $$renderer2.push("<!--[!-->");
+          $$renderer2.push(`<div class="app-icon-fallback svelte-1uha8ag"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg></div>`);
         }
-        $$renderer2.push(`<!--]--> <div class="app-icon-fallback svelte-1uha8ag"${attr_style(`display: ${stringify(!app.icon_path || app.icon_path === "" ? "flex" : "none")}`)}><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg></div></div> <div class="slider-container svelte-1uha8ag"><input type="range" min="0" max="100"${attr("value", app.volume_display)} class="svelte-1uha8ag"/> <span class="value-badge svelte-1uha8ag">${escape_html(app.volume_display)}</span></div></div>`);
+        $$renderer2.push(`<!--]--></div> <div class="slider-container svelte-1uha8ag"><input type="range" min="0" max="100"${attr("value", app.volume_display)} class="svelte-1uha8ag"/> <span class="value-badge svelte-1uha8ag">${escape_html(app.volume_display)}</span></div></div>`);
       }
     } else {
       $$renderer2.push("<!--[!-->");
