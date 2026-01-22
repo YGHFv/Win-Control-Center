@@ -332,7 +332,9 @@ unsafe fn set_default_device(id: &str) -> Result<()> {
 
     // 3. Execute PowerShell
     println!("  Executing PowerShell wrapper...");
+    use std::os::windows::process::CommandExt;
     let output = Command::new("powershell")
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .args(&[
             "-NoProfile",
             "-NonInteractive",
