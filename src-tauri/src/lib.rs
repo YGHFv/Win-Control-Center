@@ -6,9 +6,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{
+    image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, Submenu},
+    path::BaseDirectory,
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    Manager,
+    Manager, Theme,
 };
 use winreg::{enums::*, RegKey};
 
@@ -43,6 +45,11 @@ fn set_mic_volume(state: tauri::State<audio::AudioState>, vol: f32) {
 #[tauri::command]
 fn set_app_volume(state: tauri::State<audio::AudioState>, pid: u32, vol: f32) {
     let _ = state.tx.send(audio::AudioRequest::SetAppVolume(pid, vol));
+}
+
+#[tauri::command]
+fn set_app_mute(state: tauri::State<audio::AudioState>, pid: u32, mute: bool) {
+    let _ = state.tx.send(audio::AudioRequest::SetAppMute(pid, mute));
 }
 
 // --- Getter Commands (Using Request/Response) ---
@@ -157,6 +164,23 @@ async fn resize_window(app: tauri::AppHandle, height: f64) {
     }
 }
 
+fn update_tray_icon_for_theme(app: &tauri::AppHandle, theme: Theme) {
+    let icon_path = match theme {
+        Theme::Light => "icons/icon_black.png",
+        _ => "icons/icon_white.png",
+    };
+
+    if let Ok(icon) = Image::from_path(
+        app.path()
+            .resolve(icon_path, BaseDirectory::Resource)
+            .unwrap_or_default(),
+    ) {
+        if let Some(tray) = app.tray_by_id("main") {
+            let _ = tray.set_icon(Some(icon));
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -187,8 +211,24 @@ pub fn run() {
             });
 
             // No initial menu needed, we build on click
+            // Setup tray
+            let theme = app
+                .get_webview_window("main")
+                .and_then(|w| w.theme().ok())
+                .unwrap_or(Theme::Dark);
+            let icon_path = match theme {
+                Theme::Light => "icons/icon_black.png",
+                _ => "icons/icon_white.png",
+            };
+            let initial_icon = Image::from_path(
+                app.path()
+                    .resolve(icon_path, BaseDirectory::Resource)
+                    .unwrap_or_default(),
+            )
+            .unwrap_or_else(|_| app.default_window_icon().unwrap().clone());
+
             let _tray = TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(initial_icon)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
                     let id_str = event.id().as_ref();
@@ -308,8 +348,8 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let w = window.clone();
                 let app_handle = app.handle().clone();
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::Focused(false) = event {
+                window.on_window_event(move |event| match event {
+                    tauri::WindowEvent::Focused(false) => {
                         let state = app_handle.state::<AppState>();
                         let now = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -324,6 +364,10 @@ pub fn run() {
                         state.last_blur.store(now, Ordering::SeqCst);
                         let _ = w.hide();
                     }
+                    tauri::WindowEvent::ThemeChanged(theme) => {
+                        update_tray_icon_for_theme(&app_handle, *theme);
+                    }
+                    _ => {}
                 });
             }
 
@@ -342,6 +386,7 @@ pub fn run() {
             set_mic_volume,
             get_app_volumes,
             set_app_volume,
+            set_app_mute,
             get_brightness,
             set_brightness,
             get_mouse_speed,

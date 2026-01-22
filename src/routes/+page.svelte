@@ -10,7 +10,7 @@
   let brightness = 100;
   let mouseSpeed = 10;
 
-  /** @type {Array<{pid: number, name: string, volume: number, icon_path: string}>} */
+  /** @type {Array<{pid: number, name: string, volume: number, is_muted: boolean, volume_display: number, icon_path: string}>} */
   let apps = [];
 
   /** @type {any} */
@@ -117,7 +117,6 @@
 
   function setBrightness() {
     lastInteraction = Date.now();
-    if (brightness < 10) brightness = 10;
     updateBrightness(brightness);
   }
 
@@ -133,8 +132,30 @@
   function setAppVol(pid, vol) {
     lastInteraction = Date.now();
     const app = apps.find((a) => a.pid === pid);
-    if (app) app.volume = vol;
+    if (app) {
+      app.volume_display = vol;
+      app.volume = vol / 100.0;
+      apps = apps; // Force Svelte 5 compatibility refresh
+    }
     updateAppVol(pid, vol);
+  }
+
+  /**
+   * @param {number} pid
+   * @param {boolean} currentMute
+   */
+  async function toggleAppMute(pid, currentMute) {
+    lastInteraction = Date.now();
+    const app = apps.find((a) => a.pid === pid);
+    if (app) {
+      app.is_muted = !currentMute;
+      apps = apps; // Force Svelte 5 compatibility refresh
+    }
+    try {
+      await invoke("set_app_mute", { pid, mute: !currentMute });
+    } catch (e) {
+      console.error(e);
+    }
   }
 
   function handleDragStart() {
@@ -149,7 +170,8 @@
 
   async function loadState() {
     if (pollingLock) return;
-    if (initialLoaded && Date.now() - lastInteraction < 1000) return;
+    // Don't poll for 3 seconds after any interaction to give OS time to settle and prevent flicker
+    if (initialLoaded && Date.now() - lastInteraction < 3000) return;
 
     pollingLock = true;
 
@@ -168,17 +190,23 @@
 
       if (resSys.status === "fulfilled") {
         const v = resSys.value * 100;
-        if (!initialLoaded || Math.abs(v - sysVol) > 1) sysVol = v;
+        if (!initialLoaded || Math.abs(v - sysVol) > 1) {
+          sysVol = v;
+        }
       }
 
       if (resMic.status === "fulfilled") {
         const v = resMic.value * 100;
-        if (!initialLoaded || Math.abs(v - micVol) > 1) micVol = v;
+        if (!initialLoaded || Math.abs(v - micVol) > 1) {
+          micVol = v;
+        }
       }
 
       if (resBri.status === "fulfilled") {
         const v = resBri.value * 100;
-        if (!initialLoaded || Math.abs(v - brightness) > 1) brightness = v;
+        if (!initialLoaded || Math.abs(v - brightness) > 1) {
+          brightness = v;
+        }
       }
 
       if (resSpd.status === "fulfilled") {
@@ -186,12 +214,18 @@
       }
 
       if (resApps.status === "fulfilled") {
-        apps = resApps.value;
+        const newApps = resApps.value.map((a) => ({
+          ...a,
+          volume_display: Math.round(a.volume * 100),
+        }));
+        // Merge instead of replacing to preserve local state of what's currently being interacted with
+        if (!isDragging) {
+          apps = newApps;
+        }
       }
 
       if (!initialLoaded) {
         initialLoaded = true;
-        // Trigger initial resize after first load
         adjustHeight();
       }
     } catch (e) {
@@ -249,9 +283,9 @@
           min="0"
           max="100"
           bind:value={sysVol}
-          on:input={setSysVol}
-          on:pointerdown={handleDragStart}
-          on:pointerup={handleDragEnd}
+          oninput={setSysVol}
+          onpointerdown={handleDragStart}
+          onpointerup={handleDragEnd}
         />
         <span class="value-badge">{Math.round(sysVol)}</span>
       </div>
@@ -285,9 +319,9 @@
           min="0"
           max="100"
           bind:value={micVol}
-          on:input={setMicVol}
-          on:pointerdown={handleDragStart}
-          on:pointerup={handleDragEnd}
+          oninput={setMicVol}
+          onpointerdown={handleDragStart}
+          onpointerup={handleDragEnd}
         />
         <span class="value-badge">{Math.round(micVol)}</span>
       </div>
@@ -317,12 +351,12 @@
       <div class="slider-container">
         <input
           type="range"
-          min="10"
+          min="0"
           max="100"
           bind:value={brightness}
-          on:input={setBrightness}
-          on:pointerdown={handleDragStart}
-          on:pointerup={handleDragEnd}
+          oninput={setBrightness}
+          onpointerdown={handleDragStart}
+          onpointerup={handleDragEnd}
         />
         <span class="value-badge">{Math.round(brightness)}</span>
       </div>
@@ -351,9 +385,9 @@
           min="1"
           max="20"
           bind:value={mouseSpeed}
-          on:input={setMouseSpeed}
-          on:pointerdown={handleDragStart}
-          on:pointerup={handleDragEnd}
+          oninput={setMouseSpeed}
+          onpointerdown={handleDragStart}
+          onpointerup={handleDragEnd}
         />
         <span class="value-badge">{mouseSpeed}</span>
       </div>
@@ -364,14 +398,22 @@
     <div class="app-list">
       {#each apps as app (app.pid + app.name)}
         <div class="app-row">
-          <div class="icon-box" title={app.name}>
+          <div
+            class="icon-box {app.is_muted ? 'muted' : ''}"
+            title={app.name}
+            style="cursor: pointer;"
+            onclick={() => toggleAppMute(app.pid, app.is_muted)}
+          >
             {#if app.icon_path}
               <img
                 class="app-icon"
+                style="filter: {app.is_muted
+                  ? 'grayscale(1) opacity(0.5)'
+                  : 'none'}"
                 src={app.icon_path.startsWith("data:")
                   ? app.icon_path
                   : convertFileSrc(app.icon_path)}
-                on:error={(e) => {
+                onerror={(e) => {
                   const target = /** @type {HTMLImageElement} */ (
                     e.currentTarget
                   );
@@ -414,13 +456,16 @@
               type="range"
               min="0"
               max="100"
-              value={Math.round(app.volume * 100)}
-              on:input={(e) =>
-                setAppVol(app.pid, e.currentTarget.valueAsNumber)}
-              on:pointerdown={handleDragStart}
-              on:pointerup={handleDragEnd}
+              bind:value={app.volume_display}
+              oninput={(e) => {
+                const v = e.currentTarget.valueAsNumber;
+                app.volume = v / 100;
+                setAppVol(app.pid, v);
+              }}
+              onpointerdown={handleDragStart}
+              onpointerup={handleDragEnd}
             />
-            <span class="value-badge">{Math.round(app.volume * 100)}</span>
+            <span class="value-badge">{app.volume_display}</span>
           </div>
         </div>
       {:else}
@@ -434,53 +479,85 @@
   :global(body) {
     font-family: "Segoe UI", system-ui, sans-serif;
     background: transparent !important;
-    color: #333;
+    color: #1a1a1a;
     margin: 0;
     padding: 0;
     user-select: none;
     overflow: hidden;
   }
 
+  @media (prefers-color-scheme: dark) {
+    :global(body) {
+      color: #ffffff;
+    }
+  }
+
   main {
     display: flex;
     flex-direction: column;
     gap: 12px;
-    padding: 16px;
-    height: auto; /* Allow auto height for adaptation */
+    padding: 12px; /* Standard Windows margin */
+    height: auto;
     box-sizing: border-box;
-    /* overflow-y: hidden;  Hide scrollbar, let window resize handle it */
     overflow: hidden;
 
-    background: rgba(255, 255, 255, 0.45);
-    backdrop-filter: blur(32px) saturate(180%);
-    -webkit-backdrop-filter: blur(32px) saturate(180%);
+    /* Light mode: More transparent, glassier background */
+    background: rgba(243, 243, 243, 0.75);
+    backdrop-filter: blur(25px) saturate(180%);
+    -webkit-backdrop-filter: blur(25px) saturate(180%);
 
-    /* Removed thick border to blend better, used subtle shadow/outline */
-    /* border: 1px solid rgba(255, 255, 255, 0.6); */
-    border-radius: 12px; /* Match inner content radius closer */
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+    border-radius: 8px; /* Sharper Win11 corners for menus */
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.4);
   }
 
-  /* Remove scrollbar styles as we don't expect scrolling now */
+  @media (prefers-color-scheme: dark) {
+    main {
+      background: rgba(28, 28, 28, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+  }
+
   main::-webkit-scrollbar {
     width: 0px;
   }
 
   section {
-    background: #ffffff;
-    padding: 12px;
-    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.3);
+    padding: 8px; /* Tighter padding for alignment */
+    border-radius: 6px;
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05); /* Softer shadow */
+    gap: 4px; /* Unified gap for vertical rhythm */
+    border: 1px solid rgba(255, 255, 255, 0.2);
     flex-shrink: 0;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    section {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
   }
 
   .control-row {
     display: flex;
     align-items: center;
     gap: 12px;
+    padding: 4px; /* Essential for aligning with app-row */
+    border-radius: 4px;
+    transition: background-color 0.1s;
+  }
+
+  .control-row:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .control-row:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
   }
 
   .icon-box {
@@ -489,7 +566,18 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #3b82f6;
+    color: #0067c0; /* Windows 11 default blue */
+    transition: transform 0.1s;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .icon-box {
+      color: #60cdff; /* Lighter blue for dark mode */
+    }
+  }
+
+  .icon-box.muted {
+    color: #999 !important;
   }
 
   .slider-container {
@@ -503,20 +591,34 @@
     flex: 1;
     appearance: none;
     height: 4px;
-    background: #e5e5e5;
+    background: rgba(0, 0, 0, 0.1);
     border-radius: 2px;
     outline: none;
     cursor: pointer;
   }
 
+  @media (prefers-color-scheme: dark) {
+    input[type="range"] {
+      background: rgba(255, 255, 255, 0.15);
+    }
+  }
+
   input[type="range"]::-webkit-slider-thumb {
     appearance: none;
-    width: 14px;
-    height: 14px;
-    background: #3b82f6;
+    width: 16px;
+    height: 16px;
+    background: #0067c0;
     border-radius: 50%;
-    box-shadow: 0 1px 3px rgba(59, 130, 246, 0.4);
+    border: 3px solid #ffffff;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
     transition: transform 0.1s;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    input[type="range"]::-webkit-slider-thumb {
+      background: #60cdff;
+      border-color: #202020;
+    }
   }
 
   input[type="range"]::-webkit-slider-thumb:hover {
@@ -527,38 +629,47 @@
     min-width: 24px;
     text-align: right;
     font-size: 0.85em;
-    color: #888;
+    color: #666;
     font-feature-settings: "tnum";
+    font-weight: 500;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .value-badge {
+      color: #aaa;
+    }
   }
 
   .app-list {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px; /* Same as section gap */
   }
 
   .app-row {
-    padding: 6px 8px;
-    border-radius: 8px;
+    padding: 4px; /* Same padding as control-row */
+    border-radius: 4px;
     display: flex;
     align-items: center;
     gap: 12px;
-    transition: background-color 0.2s;
+    transition: background-color 0.1s;
   }
 
   .app-row:hover {
-    background: rgba(0, 0, 0, 0.04);
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .app-row:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
   }
 
   .app-icon {
-    width: 20px;
-    height: 20px;
+    width: 24px; /* Sync with icon-box width */
+    height: 24px;
     object-fit: contain;
-    border-radius: 5px;
-    background: rgba(0, 0, 0, 0.03);
-    padding: 2px;
     image-rendering: -webkit-optimize-contrast;
-    image-rendering: high-quality;
   }
 
   .app-icon-fallback {
@@ -574,7 +685,7 @@
 
   /* Override section margin or padding if needed for merged controls */
   .merged-controls {
-    gap: 16px; /* Slightly more space between items in the large group */
+    gap: 4px; /* Unified with app-list */
   }
 
   .loading {

@@ -56,6 +56,7 @@ pub struct AppVolume {
     pub pid: u32,
     pub name: String,
     pub volume: f32,
+    pub is_muted: bool,
     pub icon_path: String,
 }
 
@@ -73,6 +74,7 @@ pub enum AudioRequest {
     SetMasterVolume(f32),
     SetMicVolume(f32),
     SetAppVolume(u32, f32),
+    SetAppMute(u32, bool),
     GetPlaybackDevices(oneshot::Sender<Result<Vec<AudioDevice>>>),
     GetCaptureDevices(oneshot::Sender<Result<Vec<AudioDevice>>>),
     SetDefaultDevice(String),
@@ -162,6 +164,9 @@ impl AudioState {
                         AudioRequest::SetAppVolume(pid, vol) => {
                             let _ = unsafe { internal_set_app_vol(&c.enumerator, pid, vol) };
                         }
+                        AudioRequest::SetAppMute(pid, mute) => {
+                            let _ = unsafe { internal_set_app_mute(&c.enumerator, pid, mute) };
+                        }
                         AudioRequest::GetPlaybackDevices(tx) => {
                             let res = unsafe { get_audio_endpoints(&c.enumerator, eRender) };
                             let _ = tx.send(res);
@@ -185,7 +190,7 @@ unsafe fn internal_get_app_volumes(
     enumerator: &IMMDeviceEnumerator,
     cache: &AppCache,
 ) -> Result<Vec<AppVolume>> {
-    let mut session_map: HashMap<u32, f32> = HashMap::new();
+    let mut session_map: HashMap<u32, (f32, bool)> = HashMap::new();
     let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
     let session_manager: IAudioSessionManager2 =
         device.Activate(CLSCTX_ALL, None::<*const PROPVARIANT>)?;
@@ -204,9 +209,11 @@ unsafe fn internal_get_app_volumes(
                 }
                 if let Ok(simple_volume) = session_control.cast::<ISimpleAudioVolume>() {
                     let vol = simple_volume.GetMasterVolume()?;
-                    let entry = session_map.entry(pid).or_insert(0.0);
-                    if vol > *entry {
-                        *entry = vol;
+                    let mute = simple_volume.GetMute()?.as_bool();
+                    let entry = session_map.entry(pid).or_insert((0.0, false));
+                    if vol > entry.0 {
+                        entry.0 = vol;
+                        entry.1 = mute;
                     }
                 }
             }
@@ -216,7 +223,7 @@ unsafe fn internal_get_app_volumes(
     update_cache_batch(&pids, cache);
     let mut apps = Vec::new();
     if let Ok(map) = cache.names.lock() {
-        for (pid, vol) in session_map {
+        for (pid, (vol, mute)) in session_map {
             let (name, icon_path) = map
                 .get(&pid)
                 .cloned()
@@ -225,6 +232,7 @@ unsafe fn internal_get_app_volumes(
                 pid,
                 name,
                 volume: vol,
+                is_muted: mute,
                 icon_path,
             });
         }
@@ -232,7 +240,6 @@ unsafe fn internal_get_app_volumes(
     apps.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(apps)
 }
-
 unsafe fn internal_set_app_vol(
     enumerator: &IMMDeviceEnumerator,
     target_pid: u32,
@@ -248,6 +255,29 @@ unsafe fn internal_set_app_vol(
                 if sc2.GetProcessId()? == target_pid {
                     if let Ok(sv) = session_control.cast::<ISimpleAudioVolume>() {
                         let _ = sv.SetMasterVolume(vol, std::ptr::null());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+unsafe fn internal_set_app_mute(
+    enumerator: &IMMDeviceEnumerator,
+    target_pid: u32,
+    mute: bool,
+) -> Result<()> {
+    let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
+    let session_manager: IAudioSessionManager2 =
+        device.Activate(CLSCTX_ALL, None::<*const PROPVARIANT>)?;
+    let session_enumerator = session_manager.GetSessionEnumerator()?;
+    for i in 0..session_enumerator.GetCount()? {
+        if let Ok(session_control) = session_enumerator.GetSession(i) {
+            if let Ok(sc2) = session_control.cast::<IAudioSessionControl2>() {
+                if sc2.GetProcessId()? == target_pid {
+                    if let Ok(sv) = session_control.cast::<ISimpleAudioVolume>() {
+                        let _ = sv.SetMute(mute, std::ptr::null());
                     }
                 }
             }
