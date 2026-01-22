@@ -24,11 +24,10 @@
     await tick();
     const mainEl = document.querySelector("main");
     if (mainEl) {
-      // Offset height includes border and padding
+      // Offset height is the most reliable for border-box
       const h = mainEl.offsetHeight;
-      // Send to backend (logical pixels), small buffer to avoid scrollbar
       try {
-        await invoke("resize_window", { height: h + 2 });
+        await invoke("resize_window", { height: h });
       } catch (e) {
         console.error(e);
       }

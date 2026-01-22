@@ -40,6 +40,7 @@ pub struct AppState {
     pub is_visible: AtomicBool,
     pub last_blur: AtomicU64,
     pub last_show: AtomicU64,
+    pub height_cache: Mutex<f64>,
 
     last_tray_state: Mutex<Option<LastTrayState>>,
     tray: Mutex<Option<tauri::tray::TrayIcon>>,
@@ -171,11 +172,34 @@ fn set_mouse_speed(val: u32) {
 
 #[tauri::command]
 async fn resize_window(app: tauri::AppHandle, height: f64) {
+    let state = app.state::<AppState>();
+    *state.height_cache.lock().unwrap() = height;
+
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-            width: 360.0,
-            height,
-        }));
+        let is_visible = window.is_visible().unwrap_or(false);
+        if is_visible {
+            let old_size = window.outer_size().unwrap_or_default();
+            let scale_factor = window.scale_factor().unwrap_or(1.0);
+            let new_height_phys = (height * scale_factor) as i32;
+            let pos = window.outer_position().unwrap_or_default();
+
+            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                width: 360.0,
+                height,
+            }));
+
+            // Adjust Y to keep bottom fixed
+            let diff = new_height_phys - old_size.height as i32;
+            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                x: pos.x,
+                y: pos.y - diff,
+            }));
+        } else {
+            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                width: 360.0,
+                height,
+            }));
+        }
     }
 }
 
@@ -218,6 +242,7 @@ pub fn run() {
                 is_visible: AtomicBool::new(false),
                 last_blur: AtomicU64::new(0),
                 last_show: AtomicU64::new(0),
+                height_cache: Mutex::new(400.0),
                 last_tray_state: Mutex::new(None),
                 tray: Mutex::new(None),
             });
@@ -338,11 +363,12 @@ pub fn run() {
                                     }
                                     state.last_show.store(now, Ordering::SeqCst);
 
-                                    // Ensure size is correct BEFORE showing and calculation
+                                    // Use cached height for initial sizing and positioning
+                                    let cached_height = *state.height_cache.lock().unwrap();
                                     let _ =
                                         window.set_size(tauri::Size::Logical(tauri::LogicalSize {
                                             width: 360.0,
-                                            height: 400.0,
+                                            height: cached_height,
                                         }));
 
                                     let scale_factor = window.scale_factor().unwrap_or(1.0);
@@ -359,8 +385,9 @@ pub fn run() {
                                     };
 
                                     // DPI-aware physical size calculation
+                                    let cached_height = *state.height_cache.lock().unwrap();
                                     let target_width_phys = (360.0 * scale_factor) as i32;
-                                    let target_height_phys = (400.0 * scale_factor) as i32;
+                                    let target_height_phys = (cached_height * scale_factor) as i32;
 
                                     let x = tx + (tw as i32 / 2) - (target_width_phys / 2);
                                     let y = ty - target_height_phys - 10;
