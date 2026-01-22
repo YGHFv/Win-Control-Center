@@ -404,7 +404,7 @@
             style="cursor: pointer;"
             onclick={() => toggleAppMute(app.pid, app.is_muted)}
           >
-            {#if app.icon_path}
+            {#if app.icon_path && app.icon_path !== ""}
               <img
                 class="app-icon"
                 style="filter: {app.is_muted
@@ -418,37 +418,30 @@
                     e.currentTarget
                   );
                   target.style.display = "none";
-                  if (target.nextElementSibling) {
-                    /** @type {HTMLElement} */ (
-                      target.nextElementSibling
-                    ).style.display = "flex";
-                  }
+                  // In case of error, the user will see nothing or we could show fallback here,
+                  // but to be safe and clean we use Svelte's conditional rendering.
                 }}
                 alt=""
               />
+            {:else}
+              <div class="app-icon-fallback">
+                <svg
+                  viewBox="0 0 24 24"
+                  width="18"
+                  height="18"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  ><rect x="2" y="3" width="20" height="14" rx="2" ry="2"
+                  ></rect><line x1="8" y1="21" x2="16" y2="21"></line><line
+                    x1="12"
+                    y1="17"
+                    x2="12"
+                    y2="21"
+                  ></line></svg
+                >
+              </div>
             {/if}
-            <div
-              class="app-icon-fallback"
-              style="display: {!app.icon_path || app.icon_path === ''
-                ? 'flex'
-                : 'none'}"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="18"
-                height="18"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                ><rect x="2" y="3" width="20" height="14" rx="2" ry="2"
-                ></rect><line x1="8" y1="21" x2="16" y2="21"></line><line
-                  x1="12"
-                  y1="17"
-                  x2="12"
-                  y2="21"
-                ></line></svg
-              >
-            </div>
           </div>
 
           <div class="slider-container">
@@ -497,10 +490,13 @@
     flex-direction: column;
     gap: 12px;
     padding: 12px; /* Standard Windows margin */
-    width: 360px; /* Force consistent width */
+    width: 100%; /* Fill the window width */
+    max-width: 360px; /* Cap it for larger windows but stay centered if needed */
+    margin: 0 auto;
     height: auto;
     box-sizing: border-box;
     overflow: hidden;
+    position: relative;
 
     /* Light mode: More transparent, glassier background */
     background: rgba(243, 243, 243, 0.75);

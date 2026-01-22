@@ -222,6 +222,7 @@ pub fn run() {
             // Force decorations off and other flags for production builds
             let _ = window.set_decorations(false);
             let _ = window.set_shadow(true);
+            let _ = window.set_title("");
 
             let theme = window.theme().ok().unwrap_or(Theme::Dark);
             let icon_path = match theme {
