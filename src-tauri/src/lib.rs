@@ -8,11 +8,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, Submenu},
-    path::BaseDirectory,
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     Manager, Theme,
 };
 use winreg::{enums::*, RegKey};
+
+// Embed icons at compile time for true portability
+const ICON_WHITE_BYTES: &[u8] = include_bytes!("../icons/icon_white.png");
+const ICON_BLACK_BYTES: &[u8] = include_bytes!("../icons/icon_black.png");
 
 fn is_light_mode_registry() -> bool {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -215,22 +218,17 @@ async fn resize_window(app: tauri::AppHandle, height: f64) {
 }
 
 fn update_tray_icon_for_theme(app: &tauri::AppHandle, theme: Theme) {
-    let icon_path = match theme {
-        Theme::Light => "icons/icon_black.png",
-        _ => "icons/icon_white.png",
+    let icon_bytes = match theme {
+        Theme::Light => ICON_BLACK_BYTES,
+        _ => ICON_WHITE_BYTES,
     };
 
-    // Debug print to console if possible
     println!(
-        "System Theme changed to: {:?}, loading: {}",
-        theme, icon_path
+        "System Theme changed to: {:?}, loading from embedded bytes",
+        theme
     );
 
-    if let Ok(icon) = Image::from_path(
-        app.path()
-            .resolve(icon_path, BaseDirectory::Resource)
-            .unwrap_or_default(),
-    ) {
+    if let Ok(icon) = Image::from_bytes(icon_bytes) {
         if let Some(tray) = app.tray_by_id("main") {
             let _ = tray.set_icon(Some(icon));
         }
@@ -281,16 +279,12 @@ pub fn run() {
             } else {
                 Theme::Dark
             };
-            let icon_path = match theme {
-                Theme::Light => "icons/icon_black.png",
-                _ => "icons/icon_white.png",
+            let icon_bytes = match theme {
+                Theme::Light => ICON_BLACK_BYTES,
+                _ => ICON_WHITE_BYTES,
             };
-            let initial_icon = Image::from_path(
-                app.path()
-                    .resolve(icon_path, BaseDirectory::Resource)
-                    .unwrap_or_default(),
-            )
-            .unwrap_or_else(|_| app.default_window_icon().unwrap().clone());
+            let initial_icon = Image::from_bytes(icon_bytes)
+                .unwrap_or_else(|_| app.default_window_icon().unwrap().clone());
 
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(initial_icon)
