@@ -51,24 +51,6 @@ const CLSID_POLICY_CONFIG_VISTA: GUID = GUID {
     data4: [0xa4, 0x1b, 0xab, 0x25, 0x54, 0x60, 0xf8, 0x62],
 };
 
-#[interface("f8679f50-850a-41cf-9c72-430f290290c8")]
-unsafe trait IPolicyConfigModern {
-    fn slot3(&self) -> HRESULT;
-    fn slot4(&self) -> HRESULT;
-    fn slot5(&self) -> HRESULT;
-    fn slot6(&self) -> HRESULT;
-    fn SetDefaultEndpoint7(&self, id: PCWSTR, role: u32) -> HRESULT; // Probe Index 7
-    fn SetDefaultEndpoint8(&self, id: PCWSTR, role: u32) -> HRESULT; // Probe Index 8
-    fn SetDefaultEndpoint9(&self, id: PCWSTR, role: u32) -> HRESULT; // Probe Index 9
-    fn SetDefaultEndpoint10(&self, id: PCWSTR, role: u32) -> HRESULT; // SKIP: CRASH
-    fn SetDefaultEndpoint11_3Args(&self, id: PCWSTR, role: u32, reserved: *mut c_void) -> HRESULT; // Probe Index 11 (3-arg)
-    fn SetDefaultEndpoint12_3Args(&self, id: PCWSTR, role: u32, reserved: *mut c_void) -> HRESULT; // Probe Index 12 (3-arg)
-    fn SetDefaultEndpoint13(&self, id: PCWSTR, role: u32) -> HRESULT; // Safe (Returns S_OK)
-    fn SetDefaultEndpoint14(&self, id: PCWSTR, role: u32) -> HRESULT; // Probe Index 14
-}
-
-// ... (Rest of struct definitions omitted as they are unchanged)
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppVolume {
     pub pid: u32,
@@ -274,58 +256,118 @@ unsafe fn internal_set_app_vol(
     Ok(())
 }
 
-unsafe fn set_default_device(id: &str) -> Result<()> {
-    let id_wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
-    let pcwstr = PCWSTR(id_wide.as_ptr());
+// PowerShell Script with C# embedding for safe Process Isolation
+// This prevents STATUS_ACCESS_VIOLATION in the main app by moving the dangerous COM interaction to a child process.
+const POWERSHELL_SWITCH_SCRIPT: &str = r#"
+param($DeviceId)
 
+$Source = @"
+using System;
+using System.Runtime.InteropServices;
+
+[ComImport, Guid("870af99c-171d-4f9e-af0d-e63df40c2bc9")]
+public class PolicyConfigClient { }
+
+[ComImport, Guid("f8679f50-850a-41cf-9c72-430f290290c8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IPolicyConfig {
+    [PreserveSig] int GetMixFormat(string PCWSTR_id, out IntPtr __WAVEFORMATEX_ppFormat);
+    [PreserveSig] int GetDeviceFormat(string PCWSTR_id, int INT_bDefault, out IntPtr __WAVEFORMATEX_ppFormat);
+    [PreserveSig] int ResetDeviceFormat(string PCWSTR_id);
+    [PreserveSig] int SetDeviceFormat(string PCWSTR_id, IntPtr __WAVEFORMATEX_pEndpointFormat, IntPtr __WAVEFORMATEX_pMixFormat);
+    [PreserveSig] int GetProcessingPeriod(string PCWSTR_id, int INT_bDefault, out long __PINT64_pmftDefaultPeriod, out long __PINT64_pmftMinimumPeriod);
+    [PreserveSig] int SetProcessingPeriod(string PCWSTR_id, long __PINT64_pmftPeriod);
+    [PreserveSig] int GetShareMode(string PCWSTR_id, out IntPtr __DeviceShareMode_pMode);
+    [PreserveSig] int SetShareMode(string PCWSTR_id, IntPtr __DeviceShareMode_mode);
+    [PreserveSig] int GetPropertyValue(string PCWSTR_id, IntPtr __PROPERTYKEY_pKey, out IntPtr __PROPVARIANT_pv);
+    [PreserveSig] int SetPropertyValue(string PCWSTR_id, IntPtr __PROPERTYKEY_pKey, IntPtr __PROPVARIANT_pv);
+    [PreserveSig] int SetDefaultEndpoint(string PCWSTR_id, int INT_role);
+    [PreserveSig] int SetEndpointVisibility(string PCWSTR_id, int INT_bVisible);
+}
+
+public class AudioSwitcher {
+    public static int SetDefault(string deviceId) {
+        try {
+            var policyConfig = new PolicyConfigClient();
+            var policyInterface = (IPolicyConfig)policyConfig;
+            // Role: 0=eConsole, 1=eMultimedia, 2=eCommunications
+            policyInterface.SetDefaultEndpoint(deviceId, 0); 
+            policyInterface.SetDefaultEndpoint(deviceId, 1);
+            policyInterface.SetDefaultEndpoint(deviceId, 2);
+            return 0;
+        } catch (Exception e) {
+            Console.WriteLine("Error: " + e.Message);
+            return 1;
+        }
+    }
+}
+"@
+
+Add-Type -TypeDefinition $Source -Language CSharp
+[AudioSwitcher]::SetDefault($DeviceId)
+"#;
+
+unsafe fn set_default_device(id: &str) -> Result<()> {
     println!(
-        "DEBUG: AUDIO FIX V25 (Modern CLSID + 3-Arg Probe 12/11) START for device {}",
+        "DEBUG: AUDIO FIX V30 (Process Isolation) START for device {}",
         id
     );
-    let ROLES: [u32; 3] = [
-        eConsole.0 as u32,
-        eMultimedia.0 as u32,
-        eCommunications.0 as u32,
-    ];
 
-    if let Ok(pc_client) =
-        CoCreateInstance::<_, IUnknown>(&CLSID_POLICY_CONFIG_CLIENT, None, CLSCTX_ALL)
-    {
-        if let Ok(iface) = pc_client.cast::<IPolicyConfigModern>() {
-            println!("  IPolicyConfigModern cast successful.");
+    use std::io::Write;
+    use std::process::Command;
 
-            // Probe Sequence: 12 (3-arg) -> 11 (3-arg)
-            // Index 12 previously crashed with stack corruption hints (RPC error), implying argument mismatch.
+    // 1. Prepare temp script path
+    let mut temp_path = std::env::temp_dir();
+    temp_path.push("tauri_audio_switch_v30.ps1");
 
-            // Index 12 (3-arg)
-            println!("  Testing Index 12 (3-arg)...");
-            for &role in &ROLES {
-                let hr = iface.SetDefaultEndpoint12_3Args(pcwstr, role, std::ptr::null_mut());
-                println!("    Index 12 (3-arg), Role {} -> Result: {:?}", role, hr);
-            }
-            thread::sleep(std::time::Duration::from_millis(200));
-            if verify_default_device(id) {
-                println!("    SUCCESS: Index 12 (3-arg) worked!");
-                return Ok(());
-            }
-
-            // Index 11 (3-arg)
-            println!("  Testing Index 11 (3-arg)...");
-            for &role in &ROLES {
-                let hr = iface.SetDefaultEndpoint11_3Args(pcwstr, role, std::ptr::null_mut());
-                println!("    Index 11 (3-arg), Role {} -> Result: {:?}", role, hr);
-            }
-            thread::sleep(std::time::Duration::from_millis(200));
-            if verify_default_device(id) {
-                println!("    SUCCESS: Index 11 (3-arg) worked!");
-                return Ok(());
-            }
+    // 2. Write script to file
+    if let Ok(mut file) = std::fs::File::create(&temp_path) {
+        if let Err(e) = file.write_all(POWERSHELL_SWITCH_SCRIPT.as_bytes()) {
+            println!("ERROR: Failed to write temp PowerShell script: {}", e);
+            return Ok(());
         }
     } else {
-        println!("  ERROR: Failed to create CLSID_POLICY_CONFIG_CLIENT");
+        println!("ERROR: Failed to create temp file for PowerShell script");
+        return Ok(());
     }
 
-    println!("ERROR: All V25 strategies failed.");
+    // 3. Execute PowerShell
+    println!("  Executing PowerShell wrapper...");
+    let output = Command::new("powershell")
+        .args(&[
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            temp_path.to_str().unwrap_or(""),
+            "-DeviceId",
+            id,
+        ])
+        .output();
+
+    // 4. Handle Result
+    match output {
+        Ok(out) => {
+            if out.status.success() {
+                println!("  Process exited successfully.");
+                // Optional: verify
+                thread::sleep(std::time::Duration::from_millis(150));
+                if verify_default_device(id) {
+                    println!("  SUCCESS: Device switched verified.");
+                } else {
+                    println!("  WARNING: Process finished but verification failed.");
+                }
+            } else {
+                println!("  Process exited with error code: {:?}", out.status.code());
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                println!("  STDERR: {}", stderr);
+            }
+        }
+        Err(e) => {
+            println!("  ERROR: Failed to spawn PowerShell process: {}", e);
+        }
+    }
+
     Ok(())
 }
 

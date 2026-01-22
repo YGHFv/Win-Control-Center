@@ -1,5 +1,4 @@
-import { n as noop } from "./context.js";
-import { a as safe_not_equal } from "./equality.js";
+import { n as noop, k as safe_not_equal } from "./equality.js";
 import "clsx";
 const SCHEME = /^[a-z][a-z\d+\-.]+:/i;
 const internal = new URL("sveltekit-internal://");

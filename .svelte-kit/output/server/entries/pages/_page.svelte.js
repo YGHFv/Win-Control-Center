@@ -1,60 +1,6 @@
-import { w as attr, x as bind_props, y as ensure_array_like } from "../../chunks/index.js";
-import { invoke } from "@tauri-apps/api/core";
-import { l as ssr_context, m as fallback, k as escape_html } from "../../chunks/context.js";
-import "clsx";
-function onDestroy(fn) {
-  /** @type {SSRContext} */
-  ssr_context.r.on_destroy(fn);
-}
-function Slider($$renderer, $$props) {
-  let value = fallback($$props["value"], 0);
-  let min = fallback($$props["min"], 0);
-  let max = fallback($$props["max"], 100);
-  let step = fallback($$props["step"], 1);
-  let icon = fallback($$props["icon"], "");
-  $$renderer.push(`<div class="slider-container svelte-oyl6e3">`);
-  if (icon) {
-    $$renderer.push("<!--[-->");
-    $$renderer.push(`<span class="icon svelte-oyl6e3">${escape_html(icon)}</span>`);
-  } else {
-    $$renderer.push("<!--[!-->");
-  }
-  $$renderer.push(`<!--]--> <input type="range"${attr("min", min)}${attr("max", max)}${attr("step", step)}${attr("value", value)} class="slider svelte-oyl6e3"/> <span class="value svelte-oyl6e3">${escape_html(Math.round(value))}</span></div>`);
-  bind_props($$props, { value, min, max, step, icon });
-}
-function AppRow($$renderer, $$props) {
-  $$renderer.component(($$renderer2) => {
-    let name = $$props["name"];
-    let pid = $$props["pid"];
-    let volume = fallback($$props["volume"], 1);
-    let onVolumeChange = $$props["onVolumeChange"];
-    let sliderVal = Math.round(volume * 100);
-    sliderVal = Math.round(volume * 100);
-    let $$settled = true;
-    let $$inner_renderer;
-    function $$render_inner($$renderer3) {
-      $$renderer3.push(`<div class="app-row svelte-uwjq8b"><div class="name svelte-uwjq8b"${attr("title", name)}>${escape_html(name)}</div> `);
-      Slider($$renderer3, {
-        max: 100,
-        get value() {
-          return sliderVal;
-        },
-        set value($$value) {
-          sliderVal = $$value;
-          $$settled = false;
-        }
-      });
-      $$renderer3.push(`<!----></div>`);
-    }
-    do {
-      $$settled = true;
-      $$inner_renderer = $$renderer2.copy();
-      $$render_inner($$inner_renderer);
-    } while (!$$settled);
-    $$renderer2.subsume($$inner_renderer);
-    bind_props($$props, { name, pid, volume, onVolumeChange });
-  });
-}
+import { w as attr, x as ensure_array_like, y as attr_style, z as stringify } from "../../chunks/index.js";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { e as escape_html } from "../../chunks/context.js";
 function _page($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     let sysVol = 0;
@@ -62,78 +8,50 @@ function _page($$renderer, $$props) {
     let brightness = 100;
     let mouseSpeed = 10;
     let apps = [];
-    async function setAppVol(pid, vol) {
-      await invoke("set_app_volume", { pid, vol });
-    }
-    onDestroy(() => {
-    });
-    let $$settled = true;
-    let $$inner_renderer;
-    function $$render_inner($$renderer3) {
-      $$renderer3.push(`<main class="control-center svelte-1uha8ag"><div class="header svelte-1uha8ag"><h2 class="svelte-1uha8ag">Control Center</h2> <button class="refresh-btn svelte-1uha8ag">↻</button></div> <section class="svelte-1uha8ag"><h3 class="svelte-1uha8ag">System</h3> <div class="control-group svelte-1uha8ag"><label class="svelte-1uha8ag">Volume</label> `);
-      Slider($$renderer3, {
-        max: 100,
-        get value() {
-          return sysVol;
-        },
-        set value($$value) {
-          sysVol = $$value;
-          $$settled = false;
-        }
-      });
-      $$renderer3.push(`<!----></div> <div class="control-group svelte-1uha8ag"><label class="svelte-1uha8ag">Mic</label> `);
-      Slider($$renderer3, {
-        max: 100,
-        get value() {
-          return micVol;
-        },
-        set value($$value) {
-          micVol = $$value;
-          $$settled = false;
-        }
-      });
-      $$renderer3.push(`<!----></div></section> <section class="svelte-1uha8ag"><h3 class="svelte-1uha8ag">Display &amp; Input</h3> <div class="control-group svelte-1uha8ag"><label class="svelte-1uha8ag">Brightness</label> `);
-      Slider($$renderer3, {
-        max: 100,
-        get value() {
-          return brightness;
-        },
-        set value($$value) {
-          brightness = $$value;
-          $$settled = false;
-        }
-      });
-      $$renderer3.push(`<!----></div> <div class="control-group svelte-1uha8ag"><label class="svelte-1uha8ag">Sensitivity</label> `);
-      Slider($$renderer3, {
-        min: 1,
-        max: 20,
-        get value() {
-          return mouseSpeed;
-        },
-        set value($$value) {
-          mouseSpeed = $$value;
-          $$settled = false;
-        }
-      });
-      $$renderer3.push(`<!----></div></section> <section class="apps-section svelte-1uha8ag"><h3 class="svelte-1uha8ag">Apps Mixer</h3> <div class="app-list svelte-1uha8ag"><!--[-->`);
-      const each_array = ensure_array_like(apps);
+    $$renderer2.push(`<main class="svelte-1uha8ag"><section class="merged-controls svelte-1uha8ag"><div class="control-row svelte-1uha8ag"><div class="icon-box svelte-1uha8ag" title="System Volume"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"></path><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg></div> <div class="slider-container svelte-1uha8ag"><input type="range" min="0" max="100"${attr(
+      "value",
+      /**
+       * @param {Function} func
+       * @param {number} wait
+       */
+      /** @type {any} */
+      // --- IPC UPDATERS ---
+      /** @param {number} val */
+      /** @param {number} val */
+      /** @param {number} val */
+      /** @param {number} val */
+      /**
+       * @param {number} pid
+       * @param {number} vol
+       */
+      // --- EVENT HANDLERS ---
+      /**
+       * @param {number} pid
+       * @param {number} vol
+       */
+      // Trigger initial resize after first load
+      // Resize on window resize (system scale change)? Typically just on logic change.
+      sysVol
+    )} class="svelte-1uha8ag"/> <span class="value-badge svelte-1uha8ag">${escape_html(Math.round(sysVol))}</span></div></div> <div class="control-row svelte-1uha8ag"><div class="icon-box svelte-1uha8ag" title="Microphone"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line><line x1="8" y1="22" x2="16" y2="22"></line></svg></div> <div class="slider-container svelte-1uha8ag"><input type="range" min="0" max="100"${attr("value", micVol)} class="svelte-1uha8ag"/> <span class="value-badge svelte-1uha8ag">${escape_html(Math.round(micVol))}</span></div></div> <div class="control-row svelte-1uha8ag"><div class="icon-box svelte-1uha8ag" title="Brightness"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="M4.93 4.93l1.41 1.41"></path><path d="M17.66 17.66l1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="M4.93 19.07l1.41-1.41"></path><path d="M17.66 6.34l1.41-1.41"></path></svg></div> <div class="slider-container svelte-1uha8ag"><input type="range" min="10" max="100"${attr("value", brightness)} class="svelte-1uha8ag"/> <span class="value-badge svelte-1uha8ag">${escape_html(Math.round(brightness))}</span></div></div> <div class="control-row svelte-1uha8ag"><div class="icon-box svelte-1uha8ag" title="Mouse Speed"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="7"></rect><path d="M12 6v4"></path></svg></div> <div class="slider-container svelte-1uha8ag"><input type="range" min="1" max="20"${attr("value", mouseSpeed)} class="svelte-1uha8ag"/> <span class="value-badge svelte-1uha8ag">${escape_html(mouseSpeed)}</span></div></div></section> <section class="app-section svelte-1uha8ag"><div class="app-list svelte-1uha8ag">`);
+    const each_array = ensure_array_like(apps);
+    if (each_array.length !== 0) {
+      $$renderer2.push("<!--[-->");
       for (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {
         let app = each_array[$$index];
-        AppRow($$renderer3, {
-          name: app.name,
-          pid: app.pid,
-          volume: app.volume,
-          onVolumeChange: setAppVol
-        });
+        $$renderer2.push(`<div class="app-row svelte-1uha8ag"><div class="icon-box svelte-1uha8ag"${attr("title", app.name)}>`);
+        if (app.icon_path) {
+          $$renderer2.push("<!--[-->");
+          $$renderer2.push(`<img class="app-icon svelte-1uha8ag"${attr("src", app.icon_path.startsWith("data:") ? app.icon_path : convertFileSrc(app.icon_path))} alt=""/>`);
+        } else {
+          $$renderer2.push("<!--[!-->");
+        }
+        $$renderer2.push(`<!--]--> <div class="app-icon-fallback svelte-1uha8ag"${attr_style(`display: ${stringify(!app.icon_path || app.icon_path === "" ? "flex" : "none")}`)}><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg></div></div> <div class="slider-container svelte-1uha8ag"><input type="range" min="0" max="100"${attr("value", Math.round(app.volume * 100))} class="svelte-1uha8ag"/> <span class="value-badge svelte-1uha8ag">${escape_html(Math.round(app.volume * 100))}</span></div></div>`);
       }
-      $$renderer3.push(`<!--]--></div></section></main>`);
+    } else {
+      $$renderer2.push("<!--[!-->");
+      $$renderer2.push(`<div class="loading svelte-1uha8ag">Scanning sessions...</div>`);
     }
-    do {
-      $$settled = true;
-      $$inner_renderer = $$renderer2.copy();
-      $$render_inner($$inner_renderer);
-    } while (!$$settled);
-    $$renderer2.subsume($$inner_renderer);
+    $$renderer2.push(`<!--]--></div></section></main>`);
   });
 }
 export {

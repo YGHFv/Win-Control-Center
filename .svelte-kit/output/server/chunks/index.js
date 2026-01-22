@@ -1,4 +1,4 @@
-import { k as escape_html, p as set_ssr_context, l as ssr_context, q as push, t as pop } from "./context.js";
+import { e as escape_html, a as set_ssr_context, b as ssr_context, p as push, c as pop } from "./context.js";
 import { clsx as clsx$1 } from "clsx";
 import * as devalue from "devalue";
 const DERIVED = 1 << 1;
@@ -930,14 +930,12 @@ function attributes(attrs, css_hash, classes, styles, flags = 0) {
   }
   return attr_str;
 }
-function bind_props(props_parent, props_now) {
-  for (const key in props_now) {
-    const initial_value = props_parent[key];
-    const value = props_now[key];
-    if (initial_value === void 0 && value !== void 0 && Object.getOwnPropertyDescriptor(props_parent, key)?.set) {
-      props_parent[key] = value;
-    }
-  }
+function stringify(value) {
+  return typeof value === "string" ? value : value == null ? "" : value + "";
+}
+function attr_style(value, directives) {
+  var result = to_style(value, directives);
+  return result ? ` style="${escape_html(result, true)}"` : "";
 }
 function ensure_array_like(array_like_or_iterator) {
   if (array_like_or_iterator) {
@@ -982,6 +980,7 @@ export {
   is_passive_event as u,
   render as v,
   attr as w,
-  bind_props as x,
-  ensure_array_like as y
+  ensure_array_like as x,
+  attr_style as y,
+  stringify as z
 };
