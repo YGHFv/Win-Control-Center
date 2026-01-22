@@ -27,9 +27,6 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Submit dependency graph
-        uses: scalvert/submit-dependency-graph@v1
-        if: github.ref == 'refs/heads/main'
 
       - name: install dependencies (ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
