@@ -162,17 +162,31 @@ fn reapply_effects(window: tauri::WebviewWindow) {
 
 #[cfg(target_os = "windows")]
 fn apply_window_effect(window: &WebviewWindow) {
-    println!("Applying transparency effect (Blur)...");
-    // Use Blur (Standard) - restoring "Yesterday's" configuration
-    if let Err(e) = apply_blur(window, Some((0, 0, 0, 0))) {
-        println!("Blur failed: {:?}. Retrying Acrylic...", e);
-        if let Err(e2) = apply_acrylic(window, Some((0, 0, 0, 10))) {
-            println!("Acrylic also failed: {:?}", e2);
+    let is_light = is_light_mode_registry();
+    println!(
+        "Applying transparency effect (Light Mode: {}). Force-trying Acrylic first...",
+        is_light
+    );
+
+    // Use white tint for Light mode, black for Dark mode
+    // Alpha 128 (approx 50%) for visibility. Adjust as needed.
+    let color = if is_light {
+        (255, 255, 255, 128)
+    } else {
+        (0, 0, 0, 128)
+    };
+
+    // Try Acrylic first (Better tint support on Win10/11)
+    if let Err(e) = apply_acrylic(window, Some(color)) {
+        println!("Acrylic failed: {:?}. Retrying Blur...", e);
+        // Fallback to Blur (Legacy)
+        if let Err(e2) = apply_blur(window, Some(color)) {
+            println!("Blur also failed: {:?}", e2);
         } else {
-            println!("Acrylic applied.");
+            println!("Blur originally applied (color may be ignored).");
         }
     } else {
-        println!("Blur applied.");
+        println!("Acrylic applied successfully with color {:?}", color);
     }
 }
 
@@ -350,8 +364,8 @@ pub fn run() {
                     // Initial apply
                     apply_window_effect(&w);
 
-                    // Delayed fix
-                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    // Delayed fix - reduced time for faster startup
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     apply_window_effect(&w);
                     let _ = w.set_background_color(Some(Color(0, 0, 0, 0)));
                     println!("VIBRANCY APPLIED: Acrylic + Clean");
@@ -486,12 +500,11 @@ pub fn run() {
                                         tauri::PhysicalPosition { x, y },
                                     ));
 
+                                    // Re-apply effect BEFORE showing to prevent white flash
+                                    apply_window_effect(&window);
+
                                     let _ = window.show();
                                     let _ = window.set_focus();
-
-                                    // Re-apply effect AFTER showing (critical for some Windows versions)
-                                    // CRITICAL: Force clear background again on show to prevent white flash
-                                    apply_window_effect(&window);
                                 }
                             }
                         }
@@ -525,6 +538,13 @@ pub fn run() {
                     }
                     tauri::WindowEvent::ThemeChanged(theme) => {
                         update_tray_icon_for_theme(&app_handle, *theme);
+                        // Re-apply window effect to match new theme
+                        let w_clone = w.clone();
+                        tauri::async_runtime::spawn(async move {
+                            // Small delay to ensure registry/system state propagates if needed
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            apply_window_effect(&w_clone);
+                        });
                     }
                     _ => {}
                 });
