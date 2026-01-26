@@ -2,6 +2,8 @@ mod audio;
 mod display;
 mod input;
 
+#[cfg(target_os = "windows")]
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,6 +16,12 @@ use tauri::{
 };
 #[cfg(target_os = "windows")]
 use window_vibrancy::{apply_acrylic, apply_blur, apply_mica};
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::HWND;
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMSBT_TABBEDWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+};
 use winreg::{enums::*, RegKey};
 
 #[cfg(not(target_os = "windows"))]
@@ -38,11 +46,20 @@ fn is_light_mode_registry() -> bool {
     false
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum BlurStyle {
+    Mica,
+    MicaAlt,
+    Acrylic,
+    Blur,
+}
+
 #[derive(Clone, PartialEq)]
 struct LastTrayState {
     out_devs: Vec<audio::AudioDevice>,
     in_devs: Vec<audio::AudioDevice>,
     autostart: bool,
+    blur_style: BlurStyle,
 }
 
 pub struct AppState {
@@ -50,6 +67,7 @@ pub struct AppState {
     pub last_blur: AtomicU64,
     pub last_show: AtomicU64,
     pub height_cache: Mutex<f64>,
+    pub blur_style: Mutex<BlurStyle>,
 
     last_tray_state: Mutex<Option<LastTrayState>>,
     tray: Mutex<Option<tauri::tray::TrayIcon>>,
@@ -151,11 +169,11 @@ fn reapply_effects(window: tauri::WebviewWindow) {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let _ = window.set_shadow(true);
 
-        // 3. Apply Effect (Acrylic)
+        // 3. Apply Effect (Mica Alt Custom)
         // Note: apply_window_effect takes &WebviewWindow.
         apply_window_effect(&window);
 
-        // 4. Clear Background (CRITICAL: Must happen after Acrylic)
+        // 4. Clear Background (CRITICAL: Must happen after Mica Alt)
         let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
     }
 }
@@ -163,31 +181,106 @@ fn reapply_effects(window: tauri::WebviewWindow) {
 #[cfg(target_os = "windows")]
 fn apply_window_effect(window: &WebviewWindow) {
     let is_light = is_light_mode_registry();
+    let state = window.state::<AppState>();
+    let style = *state.blur_style.lock().unwrap();
+
     println!(
-        "Applying transparency effect (Light Mode: {}). Force-trying Acrylic first...",
-        is_light
+        "Applying transparency effect (Light Mode: {}). Style: {:?}",
+        is_light, style
     );
 
-    // Use white tint for Light mode, black for Dark mode
-    // Alpha 128 (approx 50%) for visibility. Adjust as needed.
-    let color = if is_light {
-        (255, 255, 255, 128)
+    // CRITICAL: Always reset DWM backdrop to NONE first to prevent stuck states
+    let _ = reset_mica_custom(window);
+
+    // KICK DWM: Toggle shadow off/on to force repaint of non-client area
+    // This is often required when switching between Mica and Acrylic/Blur
+    let _ = window.set_shadow(false);
+    let _ = window.set_shadow(true);
+
+    // Tiny sleep to ensure DWM catches up (prevent black flash artifact)
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let is_dark_mode = !is_light;
+    // Use fully transparent fallback to avoid black background artifacts in Acrylic/Blur
+    let fallback_color = if is_light {
+        (255, 255, 255, 0)
     } else {
-        (0, 0, 0, 128)
+        (0, 0, 0, 0)
     };
 
-    // Try Acrylic first (Better tint support on Win10/11)
-    if let Err(e) = apply_acrylic(window, Some(color)) {
-        println!("Acrylic failed: {:?}. Retrying Blur...", e);
-        // Fallback to Blur (Legacy)
-        if let Err(e2) = apply_blur(window, Some(color)) {
-            println!("Blur also failed: {:?}", e2);
-        } else {
-            println!("Blur originally applied (color may be ignored).");
+    let res = match style {
+        BlurStyle::Mica => apply_mica(window, Some(is_dark_mode)).map_err(|e| format!("{:?}", e)),
+        BlurStyle::MicaAlt => apply_mica_alt_custom(window),
+        BlurStyle::Acrylic => {
+            apply_acrylic(window, Some(fallback_color)).map_err(|e| format!("{:?}", e))
+        }
+        BlurStyle::Blur => apply_blur(window, Some(fallback_color)).map_err(|e| format!("{:?}", e)),
+    };
+
+    if let Err(e) = res {
+        println!("{:?} failed: {}. Fallback to Blur...", style, e);
+        if let Err(e2) = apply_blur(window, Some(fallback_color)) {
+            println!("Fallback Blur also failed: {:?}", e2);
         }
     } else {
-        println!("Acrylic applied successfully with color {:?}", color);
+        println!("{:?} applied successfully.", style);
     }
+
+    // Always clear background color at the end
+    let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+}
+
+#[cfg(target_os = "windows")]
+#[cfg(target_os = "windows")]
+fn reset_mica_custom(window: &WebviewWindow) -> Result<(), String> {
+    let handle = window.window_handle().map_err(|e| e.to_string())?;
+    let raw = handle.as_raw();
+
+    let hwnd_isize = match raw {
+        RawWindowHandle::Win32(h) => h.hwnd.get(),
+        _ => return Err("Not a Windows window".to_string()),
+    };
+
+    let hwnd = HWND(hwnd_isize);
+
+    unsafe {
+        // Reset to DWMSBT_AUTO (0) or DWMSBT_NONE (1).
+        // 0 resets to system default behavior which is safest for clearing overrides.
+        let val: u32 = 0;
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &val as *const _ as *const _,
+            std::mem::size_of::<u32>() as u32,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn apply_mica_alt_custom(window: &WebviewWindow) -> Result<(), String> {
+    let handle = window.window_handle().map_err(|e| e.to_string())?;
+    let raw = handle.as_raw();
+
+    let hwnd_isize = match raw {
+        RawWindowHandle::Win32(h) => h.hwnd.get(),
+        _ => return Err("Not a Windows window".to_string()),
+    };
+
+    let hwnd = HWND(hwnd_isize);
+
+    unsafe {
+        let val = DWMSBT_TABBEDWINDOW; // 4 = DWMSBT_TABBEDWINDOW
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &val as *const _ as *const _,
+            std::mem::size_of::<u32>() as u32,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // --- Brightness with Smart Cache & De-duplication ---
@@ -331,6 +424,7 @@ pub fn run() {
                 last_blur: AtomicU64::new(0),
                 last_show: AtomicU64::new(0),
                 height_cache: Mutex::new(400.0),
+                blur_style: Mutex::new(BlurStyle::MicaAlt), // Default to Mica Alt
                 last_tray_state: Mutex::new(None),
                 tray: Mutex::new(None),
             });
@@ -358,8 +452,8 @@ pub fn run() {
             {
                 let w = window.clone();
                 tauri::async_runtime::spawn(async move {
-                    // Final Attempt: Direct Startup Acrylic
-                    // Using Acrylic (Glass) + Pure Transparent Background matches the "Visible: True" config
+                    // Final Attempt: Direct Startup Mica Alt Custom
+                    // Using Mica Alt + Pure Transparent Background matches the "Visible: True" config
 
                     // Initial apply
                     apply_window_effect(&w);
@@ -368,7 +462,7 @@ pub fn run() {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     apply_window_effect(&w);
                     let _ = w.set_background_color(Some(Color(0, 0, 0, 0)));
-                    println!("VIBRANCY APPLIED: Acrylic + Clean");
+                    println!("VIBRANCY APPLIED: Mica Alt Custom + Clean");
                 });
             }
 
@@ -407,6 +501,29 @@ pub fn run() {
                         let h = app.clone();
                         tauri::async_runtime::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                            update_tray_menu(&h).await;
+                        });
+                    } else if let Some(style_str) = id_str.strip_prefix("style:") {
+                        let new_style = match style_str {
+                            "mica" => BlurStyle::Mica,
+                            "mica_alt" => BlurStyle::MicaAlt,
+                            "acrylic" => BlurStyle::Acrylic,
+                            _ => BlurStyle::Blur,
+                        };
+                        {
+                            let state = app.state::<AppState>();
+                            *state.blur_style.lock().unwrap() = new_style;
+                        }
+                        println!("Switched Blur Style to: {:?}", new_style);
+
+                        // Re-apply immediate
+                        if let Some(window) = app.get_webview_window("main") {
+                            reapply_effects(window);
+                        }
+
+                        // Trigger menu update check
+                        let h = app.clone();
+                        tauri::async_runtime::spawn(async move {
                             update_tray_menu(&h).await;
                         });
                     } else if let Some(dev_id) = id_str.strip_prefix("in:") {
@@ -593,14 +710,16 @@ async fn update_tray_menu(app_handle: &tauri::AppHandle) {
     let in_devs = rx.await.ok().and_then(|r| r.ok()).unwrap_or_default();
 
     let is_auto = get_autostart();
+    let app_state = app_handle.state::<AppState>();
+    let current_style = *app_state.blur_style.lock().unwrap();
 
     let new_state = LastTrayState {
         out_devs: out_devs.clone(),
         in_devs: in_devs.clone(),
         autostart: is_auto,
+        blur_style: current_style,
     };
 
-    let app_state = app_handle.state::<AppState>();
     {
         let mut last = app_state.last_tray_state.lock().unwrap();
         if let Some(old) = &*last {
@@ -642,6 +761,41 @@ async fn update_tray_menu(app_handle: &tauri::AppHandle) {
         );
     }
 
+    let style_menu = Submenu::new(app_handle, "模糊样式", true).unwrap();
+    let _ = style_menu.append(
+        &CheckMenuItem::with_id(
+            app_handle,
+            "style:mica",
+            "云母 (Mica)",
+            true,
+            current_style == BlurStyle::Mica,
+            None::<&str>,
+        )
+        .unwrap(),
+    );
+    let _ = style_menu.append(
+        &CheckMenuItem::with_id(
+            app_handle,
+            "style:mica_alt",
+            "云母 Alt (Mica Alt)",
+            true,
+            current_style == BlurStyle::MicaAlt,
+            None::<&str>,
+        )
+        .unwrap(),
+    );
+    let _ = style_menu.append(
+        &CheckMenuItem::with_id(
+            app_handle,
+            "style:acrylic",
+            "亚克力 (Acrylic)",
+            true,
+            current_style == BlurStyle::Acrylic,
+            None::<&str>,
+        )
+        .unwrap(),
+    );
+
     let auto_item = CheckMenuItem::with_id(
         app_handle,
         "autostart",
@@ -654,8 +808,11 @@ async fn update_tray_menu(app_handle: &tauri::AppHandle) {
 
     let quit_item = MenuItem::with_id(app_handle, "quit", "退出", true, None::<&str>).unwrap();
 
-    let menu =
-        Menu::with_items(app_handle, &[&out_menu, &in_menu, &auto_item, &quit_item]).unwrap();
+    let menu = Menu::with_items(
+        app_handle,
+        &[&out_menu, &in_menu, &style_menu, &auto_item, &quit_item],
+    )
+    .unwrap();
 
     if let Some(tray) = app_handle.tray_by_id("main") {
         let _ = tray.set_menu(Some(menu));

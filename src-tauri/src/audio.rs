@@ -28,7 +28,10 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
 };
-use windows::Win32::UI::Shell::ExtractIconExW;
+use windows::Win32::UI::Shell::{
+    ExtractIconExW, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
+    SHGFI_USEFILEATTRIBUTES,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, GetIconInfo, PrivateExtractIconsW, HICON, ICONINFO,
 };
@@ -245,22 +248,46 @@ unsafe fn internal_get_app_volumes(
     }
     let pids: Vec<u32> = session_map.keys().cloned().collect();
     update_cache_batch(&pids, cache);
-    let mut apps = Vec::new();
+
+    // Deduplicate by Name (merge sessions)
+    // Key: App Name -> (PID, Volume, Mute, Icon)
+    // We prioritize the session with the highest volume or first found
+    let mut merged_map: HashMap<String, AppVolume> = HashMap::new();
+
     if let Ok(map) = cache.names.lock() {
         for (pid, (vol, mute)) in session_map {
             let (name, icon_path) = map
                 .get(&pid)
                 .cloned()
                 .unwrap_or_else(|| (format!("App {}", pid), "".into()));
-            apps.push(AppVolume {
-                pid,
-                name,
-                volume: vol,
-                is_muted: mute,
-                icon_path,
-            });
+
+            // Skip "System" sounds if they act weird or generic duplicates (optional, but good for cleanliness)
+            if name == "Windows Audio Session" {
+                continue;
+            }
+
+            // Deduplication logic
+            merged_map
+                .entry(name.clone())
+                .and_modify(|e| {
+                    // Update existing entry if this pid seems "more active" (e.g. higher volume)
+                    if vol > e.volume {
+                        e.volume = vol;
+                        e.pid = pid; // Switch control to the louder process
+                        e.is_muted = mute;
+                    }
+                })
+                .or_insert(AppVolume {
+                    pid,
+                    name,
+                    volume: vol,
+                    is_muted: mute,
+                    icon_path,
+                });
         }
     }
+
+    let mut apps: Vec<AppVolume> = merged_map.values().cloned().collect();
     apps.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(apps)
 }
@@ -624,6 +651,7 @@ fn get_icon_as_base64(path: &str) -> String {
         path_fixed[..copy_len].copy_from_slice(&path_v16[..copy_len]);
         let count = PrivateExtractIconsW(&path_fixed, 0, 48, 48, Some(&mut h_icons), None, 0);
         if count == 0 || h_icons[0].0 == 0 {
+            // Fallback 1: ExtractIconExW
             let mut h_large = [HICON::default(); 1];
             if ExtractIconExW(
                 windows::core::PCWSTR(path_v16.as_ptr()),
@@ -636,6 +664,22 @@ fn get_icon_as_base64(path: &str) -> String {
                 h_icons[0] = h_large[0];
             }
         }
+
+        if h_icons[0].0 == 0 {
+            // Fallback 2: SHGetFileInfoW (Shell Icon - most robust for system apps)
+            let mut shfi = SHFILEINFOW::default();
+            if SHGetFileInfoW(
+                windows::core::PCWSTR(path_v16.as_ptr()),
+                windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+                Some(&mut shfi),
+                std::mem::size_of::<SHFILEINFOW>() as u32,
+                SHGFI_ICON | SHGFI_LARGEICON,
+            ) != 0
+            {
+                h_icons[0] = shfi.hIcon;
+            }
+        }
+
         if h_icons[0].0 != 0 {
             let h_icon = h_icons[0];
             let mut icon_info = ICONINFO::default();
