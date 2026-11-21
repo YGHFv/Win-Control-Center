@@ -9,12 +9,22 @@
   /** @typedef {{ id: string, name: string, is_default: boolean }} TrayMenuDevice */
   /** @typedef {{ speaker: boolean, microphone: boolean, brightness: boolean, mouse_speed: boolean, volume_mixer: boolean }} PanelVisibility */
   /** @typedef {{ playback_devices: TrayMenuDevice[], recording_devices: TrayMenuDevice[], autostart: boolean, blur_style: string, controls: PanelVisibility }} TrayMenuState */
+  /** @typedef {{ id: string, number: number, name: string, brightness: number | null, brightness_display: number }} MonitorBrightness */
+  /** @typedef {{ timer: ReturnType<typeof setTimeout> | undefined, pending: number | undefined, running: boolean }} BrightnessUpdate */
 
   let sysVol = 0;
   let sysMuted = false;
   let micVol = 0;
   let micMuted = false;
-  let brightness = 100;
+  /** @type {MonitorBrightness[]} */
+  let monitors = [];
+  /** @type {Map<string, BrightnessUpdate>} */
+  const brightnessUpdates = new Map();
+  /** @type {Record<string, string>} */
+  let brightnessErrors = {};
+  let monitorsLoaded = false;
+  let monitorLoadError = "";
+  let monitorPollingLock = false;
   let mouseSpeed = 10;
   let isTrayMenu = false;
   let activeSubmenu = "";
@@ -88,6 +98,12 @@
   $: if (initialLoaded && apps) {
     adjustHeight();
   }
+  $: if (initialLoaded && monitors) {
+    adjustHeight();
+  }
+  $: if (initialLoaded && brightnessErrors) {
+    adjustHeight();
+  }
 
   /**
    * @template {(...args: any[]) => any} T
@@ -124,14 +140,46 @@
     }
   }, 50);
 
-  /** @param {number} val */
-  const updateBrightness = debounce(async (/** @type {number} */ val) => {
-    try {
-      await invoke("set_brightness", { val: val / 100.0 });
-    } catch (e) {
-      console.error(e);
+  /**
+   * @param {string} id
+   * @param {number} val
+   */
+  function updateBrightness(id, val) {
+    let update = brightnessUpdates.get(id);
+    if (!update) {
+      update = { timer: undefined, pending: undefined, running: false };
+      brightnessUpdates.set(id, update);
     }
-  }, 50);
+    update.pending = val;
+    clearTimeout(update.timer);
+    update.timer = setTimeout(() => flushBrightness(id), 75);
+  }
+
+  /** @param {string} id */
+  async function flushBrightness(id) {
+    const update = brightnessUpdates.get(id);
+    if (!update || update.running) return;
+    update.timer = undefined;
+    update.running = true;
+    try {
+      // Keep only the latest queued value during a slow hardware write.
+      while (update.pending !== undefined) {
+        const val = update.pending;
+        update.pending = undefined;
+        try {
+          await invoke("set_monitor_brightness", { id, val: val / 100.0 });
+          delete brightnessErrors[id];
+          brightnessErrors = { ...brightnessErrors };
+        } catch (e) {
+          brightnessErrors = { ...brightnessErrors, [id]: String(e) };
+          console.error("Monitor Brightness Error:", e);
+        }
+      }
+    } finally {
+      update.running = false;
+      lastInteraction = Date.now();
+    }
+  }
 
   /** @param {number} val */
   const updateMouseSpeed = debounce(async (/** @type {number} */ val) => {
@@ -169,9 +217,10 @@
     updateMicVol(micVol);
   }
 
-  function setBrightness() {
+  /** @param {MonitorBrightness} monitor */
+  function setBrightness(monitor) {
     lastInteraction = Date.now();
-    updateBrightness(brightness);
+    updateBrightness(monitor.id, monitor.brightness_display);
   }
 
   function setMouseSpeed() {
@@ -253,14 +302,13 @@
       const results = await Promise.allSettled([
         invoke("get_system_volume"),
         invoke("get_mic_volume"),
-        invoke("get_brightness"),
         invoke("get_mouse_speed"),
         invoke("get_app_volumes"),
       ]);
 
       if (isDragging) return;
 
-      const [resSys, resMic, resBri, resSpd, resApps] = results;
+      const [resSys, resMic, resSpd, resApps] = results;
 
       if (resSys.status === "fulfilled") {
         const [v, m] = resSys.value;
@@ -277,13 +325,6 @@
         if (!initialLoaded || Math.abs(vol - micVol) > 1 || micMuted !== m) {
           micVol = vol;
           micMuted = m;
-        }
-      }
-
-      if (resBri.status === "fulfilled") {
-        const v = resBri.value * 100;
-        if (!initialLoaded || Math.abs(v - brightness) > 1) {
-          brightness = v;
         }
       }
 
@@ -310,6 +351,37 @@
       console.error("Load State Error:", e);
     } finally {
       pollingLock = false;
+    }
+  }
+
+  async function loadMonitors() {
+    if (monitorPollingLock || isDragging) return;
+    if (monitorsLoaded && Date.now() - lastInteraction < 3000) return;
+    monitorPollingLock = true;
+    const interactionAtStart = lastInteraction;
+    try {
+      const results = /** @type {Array<Omit<MonitorBrightness, "brightness_display">>} */ (
+        await invoke("get_monitor_brightness")
+      );
+      if (isDragging || interactionAtStart !== lastInteraction) return;
+      monitors = results.map((monitor) => {
+        const previous = monitors.find((item) => item.id === monitor.id);
+        const update = brightnessUpdates.get(monitor.id);
+        return {
+          ...monitor,
+          brightness_display:
+            previous && (update?.running || update?.pending !== undefined)
+              ? previous.brightness_display
+              : Math.round((monitor.brightness ?? 0) * 100),
+        };
+      });
+      monitorLoadError = "";
+      monitorsLoaded = true;
+    } catch (e) {
+      monitorLoadError = "无法读取显示器，请稍后重试";
+      console.error("Monitor List Error:", e);
+    } finally {
+      monitorPollingLock = false;
     }
   }
 
@@ -409,8 +481,10 @@
 
     loadPanelVisibility();
     loadState();
+    loadMonitors();
     interval = setInterval(() => {
       loadState();
+      loadMonitors();
     }, 2500);
 
     /** @type {undefined | (() => void)} */
@@ -431,6 +505,10 @@
 
     return () => {
       if (interval) clearInterval(interval);
+      for (const update of brightnessUpdates.values()) {
+        clearTimeout(update.timer);
+        update.pending = undefined;
+      }
       if (unlistenPanelVisibility) unlistenPanelVisibility();
       window.removeEventListener("pointerup", handleGlobalUp);
       window.removeEventListener("blur", handleGlobalUp);
@@ -681,8 +759,12 @@
     {/if}
 
     {#if panelVisibility.brightness}
-    <div class="control-row">
-      <div class="icon-box" title="Brightness">
+    {#each monitors as monitor (monitor.id)}
+    <div
+      class="control-row"
+      title={brightnessErrors[monitor.id] || `显示器 ${monitor.number} · ${monitor.name}${monitor.brightness === null ? " · 不支持亮度调节，请检查显示器 DDC/CI 设置" : ""}`}
+    >
+      <div class="icon-box monitor-icon" class:unavailable={monitor.brightness === null}>
         <svg
           xmlns="http://www.w3.org/2000/svg"
           width="20"
@@ -693,28 +775,43 @@
           stroke-width="2"
           stroke-linecap="round"
           stroke-linejoin="round"
-          ><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path
-            d="M12 20v2"
-          /><path d="M4.93 4.93l1.41 1.41" /><path
-            d="M17.66 17.66l1.41 1.41"
-          /><path d="M2 12h2" /><path d="M20 12h2" /><path
-            d="M4.93 19.07l1.41-1.41"
-          /><path d="M17.66 6.34l1.41-1.41" /></svg
+          aria-hidden="true"
+          ><rect x="2" y="3" width="20" height="14" rx="2" /><path
+            d="M12 17v4"
+          /><path d="M8 21h8" /></svg
         >
+        {#if monitors.length > 1}
+          <span class="monitor-number" aria-hidden="true">{monitor.number}</span>
+        {/if}
       </div>
       <div class="slider-container">
         <input
           type="range"
           min="0"
           max="100"
-          bind:value={brightness}
-          oninput={setBrightness}
+          aria-label={`显示器 ${monitor.number} · ${monitor.name} 亮度`}
+          aria-valuetext={`${Math.round(monitor.brightness_display)}%`}
+          disabled={monitor.brightness === null}
+          bind:value={monitor.brightness_display}
+          oninput={() => setBrightness(monitor)}
           onpointerdown={handleDragStart}
           onpointerup={handleDragEnd}
         />
-        <span class="value-badge">{Math.round(brightness)}</span>
+        <span class="value-badge" class:brightness-error={!!brightnessErrors[monitor.id]}>
+          {monitor.brightness === null ? "不可调" : `${Math.round(monitor.brightness_display)}%`}
+        </span>
       </div>
     </div>
+    {#if brightnessErrors[monitor.id]}
+      <div class="monitor-message brightness-error" role="status">
+        显示器 {monitor.number} 调节失败：{brightnessErrors[monitor.id]}
+      </div>
+    {/if}
+    {:else}
+      <div class="monitor-message" role="status">
+        {monitorLoadError || (monitorsLoaded ? "没有检测到显示器" : "正在检测显示器…")}
+      </div>
+    {/each}
     {/if}
 
     {#if panelVisibility.mouse_speed}
@@ -1126,6 +1223,65 @@
     color: #999 !important;
   }
 
+  .monitor-icon {
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  .monitor-number {
+    position: absolute;
+    right: -4px;
+    bottom: -3px;
+    min-width: 13px;
+    height: 13px;
+    padding: 0 2px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    background: #0067c0;
+    color: #fff;
+    font-size: 9px;
+    font-weight: 600;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .monitor-icon.unavailable {
+    color: #888;
+  }
+
+  .monitor-icon.unavailable .monitor-number {
+    background: #888;
+  }
+
+  .monitor-message {
+    padding: 4px;
+    color: #666;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+
+  .brightness-error {
+    color: #c42b1c;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .monitor-number {
+      background: #60cdff;
+      color: #202020;
+    }
+
+    .monitor-message {
+      color: #aaa;
+    }
+
+    .brightness-error {
+      color: #ff998f;
+    }
+  }
+
   .slider-container {
     flex: 1;
     display: flex;
@@ -1169,6 +1325,11 @@
 
   input[type="range"]::-webkit-slider-thumb:hover {
     transform: scale(1.1);
+  }
+
+  input[type="range"]:disabled {
+    cursor: default;
+    opacity: 0.4;
   }
 
   .value-badge {

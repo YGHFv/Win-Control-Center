@@ -447,56 +447,20 @@ fn apply_mica_alt_custom(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-// --- Brightness with Smart Cache & De-duplication ---
-
-pub struct BrightnessCache {
-    val: Mutex<f32>,
-    last_fetch: AtomicU64,
-    is_fetching: AtomicBool,
+#[tauri::command]
+async fn get_monitor_brightness(
+    state: tauri::State<'_, display::BrightnessState>,
+) -> Result<Vec<display::MonitorBrightness>, String> {
+    display::get_monitor_brightness(&state).await
 }
 
 #[tauri::command]
-async fn get_brightness(cache: tauri::State<'_, BrightnessCache>) -> Result<f32, String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let last = cache.last_fetch.load(Ordering::Relaxed);
-
-    // 5s cache
-    if last != 0 && now - last < 5 {
-        return Ok(*cache.val.lock().unwrap());
-    }
-
-    if cache.is_fetching.swap(true, Ordering::SeqCst) {
-        return Ok(*cache.val.lock().unwrap());
-    }
-
-    let res = display::get_brightness().await;
-    cache.is_fetching.store(false, Ordering::SeqCst);
-
-    let val = res?;
-    if let Ok(mut v) = cache.val.lock() {
-        *v = val;
-    }
-    cache.last_fetch.store(now, Ordering::Relaxed);
-    Ok(val)
-}
-
-#[tauri::command]
-async fn set_brightness(cache: tauri::State<'_, BrightnessCache>, val: f32) -> Result<(), String> {
-    display::set_brightness(val).await?;
-    if let Ok(mut v) = cache.val.lock() {
-        *v = val;
-    }
-    cache.last_fetch.store(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        Ordering::Relaxed,
-    );
-    Ok(())
+async fn set_monitor_brightness(
+    state: tauri::State<'_, display::BrightnessState>,
+    id: String,
+    val: f32,
+) -> Result<(), String> {
+    display::set_monitor_brightness(&state, id, val).await
 }
 
 #[tauri::command]
@@ -748,11 +712,7 @@ pub fn run() {
         .setup(|app| {
             let app_cache = Arc::new(audio::AppCache::new());
             app.manage(audio::AudioState::new(app_cache.clone()));
-            app.manage(BrightnessCache {
-                val: Mutex::new(0.5),
-                last_fetch: AtomicU64::new(0),
-                is_fetching: AtomicBool::new(false),
-            });
+            app.manage(display::BrightnessState::default());
 
             app.manage(AppState {
                 is_visible: AtomicBool::new(false),
@@ -1104,8 +1064,8 @@ pub fn run() {
             get_app_volumes,
             set_app_volume,
             set_app_mute,
-            get_brightness,
-            set_brightness,
+            get_monitor_brightness,
+            set_monitor_brightness,
             get_mouse_speed,
             set_mouse_speed,
             get_panel_visibility,
