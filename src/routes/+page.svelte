@@ -10,7 +10,7 @@
   /** @typedef {{ speaker: boolean, microphone: boolean, brightness: boolean, mouse_speed: boolean, volume_mixer: boolean }} PanelVisibility */
   /** @typedef {{ playback_devices: TrayMenuDevice[], recording_devices: TrayMenuDevice[], autostart: boolean, blur_style: string, controls: PanelVisibility }} TrayMenuState */
   /** @typedef {{ id: string, number: number, name: string, brightness: number | null, brightness_display: number }} MonitorBrightness */
-  /** @typedef {{ timer: ReturnType<typeof setTimeout> | undefined, pending: number | undefined, running: boolean }} BrightnessUpdate */
+  /** @typedef {{ pending: number | undefined, running: boolean }} BrightnessUpdate */
 
   let sysVol = 0;
   let sysMuted = false;
@@ -147,19 +147,17 @@
   function updateBrightness(id, val) {
     let update = brightnessUpdates.get(id);
     if (!update) {
-      update = { timer: undefined, pending: undefined, running: false };
+      update = { pending: undefined, running: false };
       brightnessUpdates.set(id, update);
     }
     update.pending = val;
-    clearTimeout(update.timer);
-    update.timer = setTimeout(() => flushBrightness(id), 75);
+    if (!update.running) void flushBrightness(id);
   }
 
   /** @param {string} id */
   async function flushBrightness(id) {
     const update = brightnessUpdates.get(id);
     if (!update || update.running) return;
-    update.timer = undefined;
     update.running = true;
     try {
       // Keep only the latest queued value during a slow hardware write.
@@ -177,6 +175,7 @@
       }
     } finally {
       update.running = false;
+      brightnessUpdates.delete(id);
       lastInteraction = Date.now();
     }
   }
@@ -217,10 +216,15 @@
     updateMicVol(micVol);
   }
 
-  /** @param {MonitorBrightness} monitor */
-  function setBrightness(monitor) {
+  /**
+   * @param {MonitorBrightness} monitor
+   * @param {number} value
+   */
+  function setBrightness(monitor, value) {
     lastInteraction = Date.now();
-    updateBrightness(monitor.id, monitor.brightness_display);
+    monitor.brightness_display = value;
+    monitors = monitors;
+    updateBrightness(monitor.id, value);
   }
 
   function setMouseSpeed() {
@@ -506,7 +510,6 @@
     return () => {
       if (interval) clearInterval(interval);
       for (const update of brightnessUpdates.values()) {
-        clearTimeout(update.timer);
         update.pending = undefined;
       }
       if (unlistenPanelVisibility) unlistenPanelVisibility();
@@ -792,13 +795,13 @@
           aria-label={`显示器 ${monitor.number} · ${monitor.name} 亮度`}
           aria-valuetext={`${Math.round(monitor.brightness_display)}%`}
           disabled={monitor.brightness === null}
-          bind:value={monitor.brightness_display}
-          oninput={() => setBrightness(monitor)}
+          value={monitor.brightness_display}
+          oninput={(event) => setBrightness(monitor, event.currentTarget.valueAsNumber)}
           onpointerdown={handleDragStart}
           onpointerup={handleDragEnd}
         />
         <span class="value-badge" class:brightness-error={!!brightnessErrors[monitor.id]}>
-          {monitor.brightness === null ? "不可调" : `${Math.round(monitor.brightness_display)}%`}
+          {monitor.brightness === null ? "不可调" : Math.round(monitor.brightness_display)}
         </span>
       </div>
     </div>

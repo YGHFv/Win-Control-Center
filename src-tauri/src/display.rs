@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
+mod wmi;
+
+use serde::Serialize;
 use std::mem::size_of;
-use std::os::windows::process::CommandExt;
-use std::process::Command;
 use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
 use windows::Win32::Devices::Display::{
@@ -16,7 +16,6 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::EDD_GET_DEVICE_INTERFACE_NAME;
 
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 const CACHE_DURATION: Duration = Duration::from_secs(5);
 const VCP_BRIGHTNESS: u8 = 0x10;
 
@@ -277,71 +276,17 @@ fn set_ddc_brightness(monitor: &Monitor, value: f32) -> Result<(), String> {
     }
 }
 
-#[derive(Deserialize)]
-struct WmiMonitor {
-    instance_name: String,
-    name: Option<String>,
-    brightness: Option<u32>,
-}
-
-fn powershell(script: &str) -> Result<String, String> {
-    let script = format!(
-        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [System.Text.UTF8Encoding]::new($false); {}",
-        script
-    );
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command"])
-        .arg(script)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
-}
-
-fn read_wmi_monitors() -> Result<Vec<WmiMonitor>, String> {
-    let json = powershell(
-        r#"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$brightness = @(Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightness -ErrorAction SilentlyContinue)
-$names = @(Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue)
-$instances = @(@($names | Where-Object Active | ForEach-Object InstanceName) + @($brightness | Where-Object Active | ForEach-Object InstanceName) | Sort-Object -Unique)
-$rows = @($instances | ForEach-Object {
-    $instance = $_
-    $monitor = $names | Where-Object InstanceName -EQ $instance | Select-Object -First 1
-    $level = $brightness | Where-Object InstanceName -EQ $instance | Select-Object -First 1
-    $name = if ($monitor) { -join ($monitor.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ }) } else { $null }
-    $value = if ($level) { [int]$level.CurrentBrightness } else { $null }
-    @{ instance_name = $instance; name = $name; brightness = $value }
-})
-ConvertTo-Json -InputObject $rows -Compress"#,
-    )?;
-    serde_json::from_str(&json).map_err(|e| e.to_string())
-}
-
 fn read_monitors() -> Result<Vec<MonitorBrightness>, String> {
     let mut monitors = enumerate_monitors()?;
-    for monitor in &mut monitors {
-        monitor.info.brightness = read_ddc_brightness(monitor);
+    if monitors.is_empty() {
+        return Ok(Vec::new());
     }
-    if !monitors.is_empty() {
-        if let Ok(wmi_monitors) = read_wmi_monitors() {
-            for monitor in &mut monitors {
-                if let Some(wmi) = wmi_monitors
-                    .iter()
-                    .find(|wmi| normalize_instance_id(&wmi.instance_name) == monitor.instance_id)
-                {
-                    if monitor.info.brightness.is_none() {
-                        monitor.info.brightness =
-                            wmi.brightness.map(|value| value.min(100) as f32 / 100.0);
-                    }
-                    if let Some(name) = wmi.name.as_ref().filter(|name| !name.is_empty()) {
-                        monitor.info.name = name.clone();
-                    }
-                }
-            }
+    let mut wmi_monitors = wmi::read_monitors();
+    for monitor in &mut monitors {
+        let data = wmi_monitors.remove(&monitor.instance_id).unwrap_or_default();
+        monitor.info.brightness = data.brightness.or_else(|| read_ddc_brightness(monitor));
+        if let Some(name) = data.name {
+            monitor.info.name = name;
         }
     }
     Ok(monitors.into_iter().map(|monitor| monitor.info).collect())
@@ -353,33 +298,16 @@ fn write_monitor(id: &str, value: f32) -> Result<(), String> {
         .iter()
         .find(|monitor| monitor.info.id == id)
         .ok_or("显示器已断开，请刷新后重试")?;
-    if set_ddc_brightness(monitor, value).is_ok() {
+    let wmi_result = if monitor.instance_id.is_empty() {
+        Ok(false)
+    } else {
+        wmi::set_brightness(&monitor.instance_id, value)
+    };
+    if matches!(wmi_result, Ok(true)) || set_ddc_brightness(monitor, value).is_ok() {
         return Ok(());
     }
-    if monitor.instance_id.is_empty() {
-        return Err("此显示器不支持亮度调节，请检查 DDC/CI 设置".into());
-    }
-    let wmi = read_wmi_monitors()?
-        .into_iter()
-        .find(|wmi| {
-            normalize_instance_id(&wmi.instance_name) == monitor.instance_id
-                && wmi.brightness.is_some()
-        })
-        .ok_or("此显示器不支持亮度调节，请检查 DDC/CI 设置")?;
-    // Match one exact WMI instance; never fall back to writing every monitor.
-    let instance = wmi.instance_name.replace('\'', "''");
-    let script = format!(
-        "$ErrorActionPreference = 'Stop'; \
-         $monitor = Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightnessMethods \
-         | Where-Object InstanceName -EQ '{}'; \
-         if (-not $monitor) {{ throw 'Monitor disconnected' }}; \
-         $result = Invoke-CimMethod -InputObject $monitor -MethodName WmiSetBrightness \
-         -Arguments @{{ Timeout = [uint32]1; Brightness = [byte]{} }}; \
-         if ($null -ne $result.ReturnValue -and [int]$result.ReturnValue -ne 0) {{ throw 'Brightness update failed' }}",
-        instance,
-        (value * 100.0).round() as u32
-    );
-    powershell(&script).map(|_| ())
+    wmi_result?;
+    Err("此显示器不支持亮度调节，请检查 DDC/CI 设置".into())
 }
 
 pub async fn get_monitor_brightness(
@@ -443,5 +371,31 @@ mod tests {
     fn monitor_number_uses_windows_display_number() {
         assert_eq!(display_number(r"\\.\DISPLAY2"), 2);
         assert_eq!(display_number(r"\\.\DISPLAY12"), 12);
+    }
+
+    #[test]
+    #[ignore = "requires a connected monitor with brightness control"]
+    fn hardware_brightness_roundtrip() {
+        let started = Instant::now();
+        let monitors = read_monitors().expect("read connected monitors");
+        println!("Monitor read: {:?}", started.elapsed());
+        let monitor = monitors
+            .iter()
+            .find(|monitor| monitor.brightness.is_some())
+            .expect("a monitor with brightness control");
+        let value = monitor.brightness.unwrap();
+        for _attempt in 0..3 {
+            let started = Instant::now();
+            write_monitor(&monitor.id, value).expect("write the current brightness");
+            println!("Monitor {} write: {:?}", monitor.number, started.elapsed());
+        }
+        let refreshed = read_monitors().expect("read brightness after writing");
+        let actual = refreshed
+            .iter()
+            .find(|item| item.id == monitor.id)
+            .and_then(|item| item.brightness)
+            .expect("the same monitor is still connected");
+        assert!((actual - value).abs() < 0.02);
+        assert!(write_monitor("disconnected-monitor", value).is_err());
     }
 }
