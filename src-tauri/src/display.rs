@@ -285,8 +285,13 @@ struct WmiMonitor {
 }
 
 fn powershell(script: &str) -> Result<String, String> {
+    let script = format!(
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [System.Text.UTF8Encoding]::new($false); {}",
+        script
+    );
     let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(script)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| e.to_string())?;
@@ -370,7 +375,7 @@ fn write_monitor(id: &str, value: f32) -> Result<(), String> {
          if (-not $monitor) {{ throw 'Monitor disconnected' }}; \
          $result = Invoke-CimMethod -InputObject $monitor -MethodName WmiSetBrightness \
          -Arguments @{{ Timeout = [uint32]1; Brightness = [byte]{} }}; \
-         if ($result.ReturnValue -ne 0) {{ throw 'Brightness update failed' }}",
+         if ($null -ne $result.ReturnValue -and [int]$result.ReturnValue -ne 0) {{ throw 'Brightness update failed' }}",
         instance,
         (value * 100.0).round() as u32
     );
